@@ -5,6 +5,10 @@ import { View, Text, StyleSheet, TouchableOpacity, FlatList, Image, TextInput, S
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from './supabase'; 
 
+// <-- NEW: We imported the tools to bypass the Android fetch block
+import * as FileSystem from 'expo-file-system';
+import { decode } from 'base64-arraybuffer';
+
 // --- OUR LUXURY DESIGN SYSTEM ---
 const COLORS = {
   background: '#F9F7F2', 
@@ -69,7 +73,6 @@ function LoginScreen() {
 
 // --- 2. MEMORY CARD COMPONENT ---
 const MemoryCard = ({ memory }) => {
-  // Grab the first image to use as the cover, or a beautiful fallback color if no image
   const coverImage = memory.media_urls && memory.media_urls.length > 0 ? memory.media_urls[0] : null;
 
   return (
@@ -90,12 +93,11 @@ const MemoryCard = ({ memory }) => {
   );
 };
 
-// --- 3. HOME SCREEN (NOW FETCHES REAL DATA) ---
+// --- 3. HOME SCREEN ---
 function HomeScreen({ navigation }) {
   const [memories, setMemories] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Fetch memories from Supabase
   const fetchMemories = async () => {
     setLoading(true);
     const { data: { user } } = await supabase.auth.getUser();
@@ -103,15 +105,14 @@ function HomeScreen({ navigation }) {
       const { data, error } = await supabase
         .from('memories')
         .select('*')
-        .eq('user_id', user.id) // Only get YOUR memories
-        .order('id', { ascending: false }); // Newest at the top
+        .eq('user_id', user.id) 
+        .order('id', { ascending: false }); 
       
       if (!error && data) setMemories(data);
     }
     setLoading(false);
   };
 
-  // This beautifully refreshes the screen every time you navigate back to it
   useFocusEffect(
     useCallback(() => {
       fetchMemories();
@@ -151,7 +152,7 @@ function HomeScreen({ navigation }) {
   );
 }
 
-// --- 4. ADD MEMORY SCREEN (NOW UPLOADS REAL DATA) ---
+// --- 4. ADD MEMORY SCREEN ---
 function AddMemoryScreen({ navigation }) {
   const [title, setTitle] = useState('');
   const [date, setDate] = useState('');
@@ -163,7 +164,7 @@ function AddMemoryScreen({ navigation }) {
     let result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.All,
       allowsMultipleSelection: true,
-      quality: 0.8, // Slightly compressed for faster uploading
+      quality: 0.8, 
     });
 
     if (!result.canceled) {
@@ -183,22 +184,22 @@ function AddMemoryScreen({ navigation }) {
       const { data: { user } } = await supabase.auth.getUser();
       let uploadedUrls = [];
 
-      // 1. Upload each photo/video to the storage bucket
+      // 1. Upload each photo/video to the storage bucket safely
       for (const uri of selectedMedia) {
-        // Convert the local file into a format Supabase can upload
-        const response = await fetch(uri);
-        const blob = await response.blob();
-        
-        // Create a unique name for the file
         const fileExt = uri.split('.').pop() || 'jpg';
         const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
-        const filePath = `${user.id}/${fileName}`; // Saves it in a folder with your user ID
+        const filePath = `${user.id}/${fileName}`; 
 
-        // Upload to bucket
-        const { error: uploadError } = await supabase.storage.from('memory_media').upload(filePath, blob);
+        // <-- THE FIX: Convert the file to raw Base64 data, decode it, and push it directly
+        const base64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+        const arrayBuffer = decode(base64);
+
+        const { error: uploadError } = await supabase.storage.from('memory_media').upload(filePath, arrayBuffer, {
+          contentType: `image/${fileExt === 'jpg' ? 'jpeg' : fileExt}`
+        });
+
         if (uploadError) throw uploadError;
 
-        // Get the public URL for the image
         const { data: publicUrlData } = supabase.storage.from('memory_media').getPublicUrl(filePath);
         uploadedUrls.push(publicUrlData.publicUrl);
       }
