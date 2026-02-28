@@ -6,15 +6,15 @@ import {
   Alert, ScrollView, TextInput, FlatList, KeyboardAvoidingView, Platform, Dimensions, ActivityIndicator 
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { Video } from 'expo-av';
+import { useVideoPlayer, VideoView } from 'expo-video';
 
 // --- SUPABASE SETUP ---
 import 'react-native-url-polyfill/auto'; 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = 'YOUR_SUPABASE_URL';
-const supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
+const supabaseUrl = 'https://ecopftxlcuesayrzoydl.supabase.co';
+const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVjb3BmdHhsY3Vlc2F5cnpveWRsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIyMjIwMjYsImV4cCI6MjA4Nzc5ODAyNn0.l1PWA0__-gten7E5XGV5KUzia4ryswlLKxEySXSjh70';
 const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { storage: AsyncStorage, autoRefreshToken: true, persistSession: true, detectSessionInUrl: false },
 });
@@ -24,6 +24,25 @@ const COLORS = { background: '#F9F7F2', textPrimary: '#2D2926', textSecondary: '
 
 const MemoryContext = createContext();
 const Stack = createNativeStackNavigator();
+
+// --- SMART VIDEO PLAYER (Plays only when active) ---
+function MemoryVideo({ uri, isActive }) {
+  const player = useVideoPlayer(uri, player => {
+    player.loop = true;
+    if (isActive) player.play(); // Auto-play if it is the first item
+  });
+
+  // Watch for the user swiping. If active, play. If not, pause.
+  useEffect(() => {
+    if (isActive) {
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [isActive]);
+
+  return <VideoView player={player} style={{ flex: 1 }} allowsFullscreen allowsPictureInPicture />;
+}
 
 // --- AUTH SCREEN ---
 function AuthScreen() {
@@ -63,7 +82,6 @@ function AuthScreen() {
 function HomeScreen({ navigation }) {
   const { memories, fetchMemories, loading } = useContext(MemoryContext);
 
-  // This forces the app to refresh your memories every time you view the Home screen
   useFocusEffect(
     useCallback(() => {
       fetchMemories();
@@ -101,13 +119,18 @@ function HomeScreen({ navigation }) {
 // --- NEW MEMORY SCREEN ---
 function NewMemoryScreen({ navigation }) {
   const [mediaList, setMediaList] = useState([]);
+  const [thumbnailIndex, setThumbnailIndex] = useState(0); // Tracks which image is the cover
   const [title, setTitle] = useState('');
   const [date, setDate] = useState('');
   const [description, setDescription] = useState('');
   const [uploading, setUploading] = useState(false);
 
   const pickMedia = async () => {
-    let result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.All, allowsMultipleSelection: true, quality: 0.5 });
+    let result = await ImagePicker.launchImageLibraryAsync({ 
+      mediaTypes: ['images', 'videos'], 
+      allowsMultipleSelection: true, 
+      quality: 0.5 
+    });
     if (!result.canceled) setMediaList([...mediaList, ...result.assets.map(a => ({ uri: a.uri, type: a.type }))]);
   };
 
@@ -126,7 +149,11 @@ function NewMemoryScreen({ navigation }) {
     if (!title || mediaList.length === 0) return Alert.alert("Error", "Title and media required.");
     setUploading(true);
     try {
-      const uploadedMedia = await Promise.all(mediaList.map(file => uploadFile(file)));
+      // Reorder the list so the selected Cover Image is always first
+      const selectedCover = mediaList[thumbnailIndex];
+      const reorderedList = [selectedCover, ...mediaList.filter((_, i) => i !== thumbnailIndex)];
+
+      const uploadedMedia = await Promise.all(reorderedList.map(file => uploadFile(file)));
       const { data: { user } } = await supabase.auth.getUser();
       
       const { error } = await supabase.from('memories').insert([{ user_id: user.id, title, date, description, media: uploadedMedia }]);
@@ -144,10 +171,22 @@ function NewMemoryScreen({ navigation }) {
         <View style={{ width: 50 }} />
       </View>
       <ScrollView contentContainerStyle={styles.scrollContent}>
-        <ScrollView horizontal style={styles.imageContainer}>
-          {mediaList.map((m, i) => <Image key={i} source={{ uri: m.uri }} style={styles.selectedImage} />)}
+        
+        <ScrollView horizontal style={styles.imageContainer} showsHorizontalScrollIndicator={false}>
+          {mediaList.map((m, i) => (
+            <TouchableOpacity key={i} onPress={() => setThumbnailIndex(i)}>
+              <Image 
+                source={{ uri: m.uri }} 
+                style={[styles.selectedImage, thumbnailIndex === i && styles.activeThumbnail]} 
+              />
+              {thumbnailIndex === i && (
+                <View style={styles.coverBadge}><Text style={styles.coverBadgeText}>Cover</Text></View>
+              )}
+            </TouchableOpacity>
+          ))}
           <TouchableOpacity style={styles.addMoreBox} onPress={pickMedia}><Text style={styles.addMoreText}>+ Media</Text></TouchableOpacity>
         </ScrollView>
+
         <TextInput style={styles.textInput} placeholder="Memory Title" value={title} onChangeText={setTitle} />
         <TextInput style={styles.textInput} placeholder="Date" value={date} onChangeText={setDate} />
         <TextInput style={[styles.textInput, {height: 100}]} multiline placeholder="The Story..." value={description} onChangeText={setDescription} />
@@ -162,21 +201,63 @@ function NewMemoryScreen({ navigation }) {
 // --- DETAIL VIEW SCREEN ---
 function MemoryDetailScreen({ route, navigation }) {
   const { memory } = route.params;
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0); // Tracks which image/video you are looking at
+
+  const handleDelete = () => {
+    Alert.alert("Delete Memory", "Are you sure you want to permanently delete this memory?", [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: async () => {
+            setIsDeleting(true);
+            const { error } = await supabase.from('memories').delete().eq('id', memory.id);
+            setIsDeleting(false);
+            if (error) Alert.alert("Error", error.message);
+            else navigation.goBack();
+          }
+        }
+    ]);
+  };
+
+  // Updates the active index when you swipe
+  const handleScroll = (event) => {
+    const slideSize = event.nativeEvent.layoutMeasurement.width;
+    const index = event.nativeEvent.contentOffset.x / slideSize;
+    const roundIndex = Math.round(index);
+    if (activeIndex !== roundIndex) setActiveIndex(roundIndex);
+  };
+
   return (
     <View style={styles.container}>
-      <View style={styles.headerRow}><TouchableOpacity onPress={() => navigation.goBack()}><Text style={styles.cancelText}>Back</Text></TouchableOpacity></View>
-      <ScrollView horizontal pagingEnabled style={{height: 400}}>
-        {memory.media.map((m, i) => (
-          <View key={i} style={{width: width, height: 400}}>
-            {m.type === 'video' ? <Video source={{uri: m.uri}} useNativeControls resizeMode="cover" style={{flex:1}} /> : <Image source={{uri: m.uri}} style={{flex:1}} />}
-          </View>
-        ))}
-      </ScrollView>
-      <View style={{padding: 24}}>
-        <Text style={styles.mainHeaderText}>{memory.title}</Text>
-        <Text style={styles.cardDate}>{memory.date}</Text>
-        <Text style={styles.cardDescription}>{memory.description}</Text>
+      <View style={styles.headerRow}>
+        <TouchableOpacity onPress={() => navigation.goBack()}><Text style={styles.cancelText}>Back</Text></TouchableOpacity>
+        <TouchableOpacity onPress={handleDelete} disabled={isDeleting}>
+          <Text style={[styles.cancelText, { color: '#D9534F' }]}>{isDeleting ? "..." : "Delete"}</Text>
+        </TouchableOpacity>
       </View>
+      <ScrollView showsVerticalScrollIndicator={false}>
+        <ScrollView 
+          horizontal 
+          pagingEnabled 
+          style={{height: 400}}
+          onScroll={handleScroll}
+          scrollEventThrottle={16} // Ensures smooth tracking of the swipe
+        >
+          {memory.media.map((m, i) => (
+            <View key={i} style={{width: width, height: 400}}>
+              {m.type === 'video' ? (
+                <MemoryVideo uri={m.uri} isActive={activeIndex === i} />
+              ) : (
+                <Image source={{uri: m.uri}} style={{flex:1}} />
+              )}
+            </View>
+          ))}
+        </ScrollView>
+        <View style={{padding: 24}}>
+          <Text style={styles.mainHeaderText}>{memory.title}</Text>
+          <Text style={styles.cardDate}>{memory.date}</Text>
+          <Text style={styles.cardDescription}>{memory.description}</Text>
+        </View>
+      </ScrollView>
     </View>
   );
 }
@@ -187,17 +268,23 @@ export default function App() {
   const [memories, setMemories] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // The Security Guard: Keeps you logged in automatically
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
+    const fetchSession = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      setSession(user ? { user } : null);
+    };
+    fetchSession();
     supabase.auth.onAuthStateChange((_event, session) => setSession(session));
   }, []);
 
   const fetchMemories = async () => {
-    if (!session?.user) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
     setLoading(true);
     const { data, error } = await supabase.from('memories').select('*').order('created_at', { ascending: false });
-    if (!error) setMemories(data);
+    if (error) Alert.alert("Database Error", error.message);
+    else setMemories(data);
     setLoading(false);
   };
 
@@ -243,6 +330,9 @@ const styles = StyleSheet.create({
   scrollContent: { padding: 24 },
   imageContainer: { flexDirection: 'row', marginBottom: 20 },
   selectedImage: { width: 100, height: 130, borderRadius: 12, marginRight: 10 },
+  activeThumbnail: { borderWidth: 3, borderColor: COLORS.accent },
+  coverBadge: { position: 'absolute', bottom: 10, left: 5, backgroundColor: COLORS.accent, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  coverBadgeText: { color: COLORS.white, fontSize: 10, fontWeight: 'bold' },
   addMoreBox: { width: 100, height: 130, borderRadius: 12, borderStyle: 'dashed', borderWidth: 2, borderColor: COLORS.border, justifyContent: 'center', alignItems: 'center' },
   addMoreText: { color: COLORS.secondary, fontSize: 12 },
   textInput: { backgroundColor: COLORS.white, borderRadius: 12, padding: 15, marginBottom: 15, borderWidth: 1, borderColor: COLORS.border },
